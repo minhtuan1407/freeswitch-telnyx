@@ -6847,6 +6847,12 @@ static void sofia_handle_sip_r_options(switch_core_session_t *session, int statu
 		gateway->ping = switch_epoch_time_now(NULL) + gateway->ping_freq;
 		sofia_reg_release_gateway(gateway);
 		gateway->pinging = 0;
+	} else if (sofia_private && sofia_private->send_options_cond) {
+		// handle SIP send_options API
+		switch_mutex_lock(sofia_private->send_options_mutex);
+		sofia_private->send_options_status = status;
+		switch_thread_cond_signal(sofia_private->send_options_cond);
+		switch_mutex_unlock(sofia_private->send_options_mutex);
 	} else if (sip && sip->sip_to && sip->sip_call_id && sip->sip_call_id->i_id && strchr(sip->sip_call_id->i_id, '_')) {
 		const char *call_id = strchr(sip->sip_call_id->i_id, '_') + 1;
 		char *sql;

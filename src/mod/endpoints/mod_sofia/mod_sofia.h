@@ -191,6 +191,10 @@ struct sofia_private {
 	int is_static;
 	switch_time_t ping_sent;
 	char *rfc7989_uuid;
+
+	switch_mutex_t *send_options_mutex;
+	switch_thread_cond_t *send_options_cond;
+	int send_options_status;
 };
 
 #define set_param(ptr,val) if (ptr) {free(ptr) ; ptr = NULL;} if (val) {ptr = strdup(val);}

@@ -3813,6 +3813,87 @@ static switch_status_t cmd_count(char **argv, int argc, switch_stream_handle_t *
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static switch_status_t cmd_profile_send_options(sofia_profile_t *profile, const char*  destination, switch_stream_handle_t *stream){
+
+	nua_handle_t *nh;
+	char to[512] = "", call_id[512] = "";
+	switch_uuid_t uuid;
+	sofia_private_t *pvt = NULL;
+	switch_memory_pool_t *pool;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	uint32_t ping_rtt = 0;
+	int response_status = 0;
+
+	if (!profile || zstr(destination)) {
+		stream->write_function(stream, "Invalid Parameters!\n");
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	/* Setup the pool */
+	if ((status = switch_core_new_memory_pool(&pool)) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Memory Error!\n");
+		goto done;
+	}
+
+	// format the destination: user@ip:port
+	switch_snprintf(to, sizeof(to), "sip:%s", destination);
+
+	// create call-id for OPTIONS in the form "<uuid>_<profile>_send_options"
+	switch_uuid_get(&uuid);
+	switch_uuid_format(call_id, &uuid);
+	strcat(call_id, "_");
+	// strncat(call_id, argv[0], sizeof(call_id) - SWITCH_UUID_FORMATTED_LENGTH - 2);
+	strncat(call_id, profile->name, sizeof(call_id) - SWITCH_UUID_FORMATTED_LENGTH - 2);
+	strcat(call_id, "_send_options");
+
+	nh = nua_handle(profile->nua, NULL, SIPTAG_FROM_STR(profile->url), SIPTAG_TO_STR(to), NUTAG_URL(to), SIPTAG_CONTACT_STR(profile->url), SIPTAG_CALL_ID_STR(call_id), TAG_END());
+
+	pvt = malloc(sizeof(*pvt));
+	switch_assert(pvt);
+	memset(pvt, 0, sizeof(*pvt));
+	pvt->destroy_nh = 1;
+	pvt->destroy_me = 0;
+	pvt->ping_sent = switch_time_now();
+	nua_handle_bind(nh, pvt);
+
+	// send the OPTIONS message
+	nua_options(nh, TAG_END());
+
+	// initialize the mutex and conditions
+	switch_mutex_init(&pvt->send_options_mutex, SWITCH_MUTEX_NESTED, pool);
+	switch_thread_cond_create(&pvt->send_options_cond, pool);
+
+	// wait for the response and return the round trip time and the response code
+	switch_mutex_lock(pvt->send_options_mutex);
+	switch_thread_cond_timedwait(pvt->send_options_cond, pvt->send_options_mutex, 5000000);
+	switch_mutex_unlock(pvt->send_options_mutex);
+
+	if (SWITCH_STATUS_TIMEOUT == status) {
+		// we timeout waiting for the response
+		stream->write_function(stream, "Timeout waiting for response from %s\n", to);
+		goto done;
+	}
+
+	response_status = pvt->send_options_status;
+
+	// got the response, we can now print the results
+	ping_rtt = (uint32_t)((switch_time_now() - pvt->ping_sent) / 1000);
+
+	stream->write_function(stream, "SIP OPTIONS response from %s: %d, with round trip time of %d ms\n", to, response_status, ping_rtt);
+
+done:
+	if (pvt) {
+		pvt -> destroy_me = 12;
+		sofia_private_free(pvt);
+	}
+
+	if (pool) {
+		switch_core_destroy_memory_pool(&pool);
+	}
+
+	return status;
+}
+
 static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t *stream)
 {
 	sofia_profile_t *profile = NULL;
@@ -3847,7 +3928,16 @@ static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t
 		return SWITCH_STATUS_SUCCESS;
 	}
 
-	if (!strcasecmp(argv[1], "killgw")) {
+	if (!strcasecmp(argv[1], "send_options")) {
+		// we need to send an OPTIONS message to a specific SIP destination
+		if (argv[2]) {
+			cmd_profile_send_options(profile, argv[2], stream);
+			goto done;
+		} else {
+			stream->write_function(stream, "-ERR missing destination\n");
+			goto done;
+		}
+	} else if (!strcasecmp(argv[1], "killgw")) {
 		sofia_gateway_t *gateway_ptr;
 		if (argc < 3) {
 			stream->write_function(stream, "-ERR missing gw name\n");
@@ -7191,6 +7281,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	switch_console_set_complete("add sofia profile ::sofia::list_profiles startgw _all_");
 	switch_console_set_complete("add sofia profile ::sofia::list_profiles ::[siptrace:capture:watchdog ::[on:off");
 	switch_console_set_complete("add sofia profile ::sofia::list_profiles gwlist ::[up:down");
+	switch_console_set_complete("add sofia profile ::sofia::list_profiles send_options <destinations>");
 
 	switch_console_set_complete("add sofia recover flush");
 
